@@ -102,6 +102,51 @@ func (h *Header) SetText(k, v string) {
 	h.Set(k, encodeHeader(v))
 }
 
+// HeaderView is a read-only view of a header field, providing both the raw
+// bytes and the decoded value.
+type HeaderView struct {
+	key   string
+	raw   []byte
+	value string
+	err   error
+}
+
+// Key returns the field key.
+func (v HeaderView) Key() string { return v.key }
+
+// Raw returns the raw field bytes, including the trailing CRLF.
+//
+// The returned slice should not be modified.
+func (v HeaderView) Raw() []byte { return v.raw }
+
+// Value returns the decoded field value. If the value contains an illegal
+// encoded-word, the raw value is returned and the error is non-nil.
+func (v HeaderView) Value() (string, error) { return v.value, v.err }
+
+// View returns a read-only view of all header fields, in their original order.
+// Each field provides both the raw bytes and the decoded value.
+//
+// The returned slice should not be modified.
+func (h *Header) View() []HeaderView {
+	fields := h.Fields()
+	var views []HeaderView
+	for fields.Next() {
+		raw, err := fields.Raw()
+		if err != nil {
+			// If raw bytes are not available, fall back to the value.
+			raw = []byte(fields.Value())
+		}
+		value, decErr := fields.Text()
+		views = append(views, HeaderView{
+			key:   fields.Key(),
+			raw:   raw,
+			value: value,
+			err:   decErr,
+		})
+	}
+	return views
+}
+
 // Copy creates a stand-alone copy of the header.
 func (h *Header) Copy() Header {
 	return Header{h.Header.Copy()}

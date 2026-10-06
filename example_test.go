@@ -1,12 +1,15 @@
 package message_test
 
 import (
+	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"strings"
 
 	"github.com/emersion/go-message"
+	"github.com/emersion/go-message/textproto"
 )
 
 func ExampleRead() {
@@ -135,4 +138,30 @@ func Example_transform() {
 	w.Close()
 
 	log.Println(b.String())
+}
+
+func ExampleHeader_View() {
+	raw := "From: sender@example.com\r\n" +
+		"Subject: =?utf-8?q?Hello_World?=\r\n" +
+		"Subject: =?INVALIDCHARSET?B?dSB1bmRlcnN0YW5k?=\r\n" +
+		"To: recipient@example.com\r\n\r\n"
+
+	th, err := textproto.ReadHeader(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		log.Fatal(err)
+	}
+	h := message.Header{th}
+
+	for _, v := range h.View() {
+		decoded, err := v.Value()
+		if err != nil {
+			decoded = "(decode error)"
+		}
+		fmt.Printf("%s: raw=%q decoded=%q\n", v.Key(), v.Raw(), decoded)
+	}
+	// Output:
+	// From: raw="From: sender@example.com\r\n" decoded="sender@example.com"
+	// Subject: raw="Subject: =?utf-8?q?Hello_World?=\r\n" decoded="Hello World"
+	// Subject: raw="Subject: =?INVALIDCHARSET?B?dSB1bmRlcnN0YW5k?=\r\n" decoded="(decode error)"
+	// To: raw="To: recipient@example.com\r\n" decoded="recipient@example.com"
 }
