@@ -2,6 +2,7 @@ package message_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"strings"
@@ -135,4 +136,60 @@ func Example_transform() {
 	w.Close()
 
 	log.Println(b.String())
+}
+
+// ExampleMultipartReader_LeasePart demonstrates the sequential part lease
+// entry point over an in-memory stream. Each part's first segment is read
+// only halfway and then the lease is given up with Abandon, which drains the
+// remainder before moving on; advancing without finishing the current part
+// is rejected. The borrowed stream is never closed by the reader.
+func ExampleMultipartReader_LeasePart() {
+	r := strings.NewReader(
+		"Content-Type: multipart/mixed; boundary=BOUND\r\n" +
+			"\r\n" +
+			"--BOUND\r\n" +
+			"Content-Type: text/plain\r\n" +
+			"\r\n" +
+			"0123456789ABCDEF\r\n" +
+			"--BOUND\r\n" +
+			"Content-Type: text/plain\r\n" +
+			"\r\n" +
+			"FEDCBA9876543210\r\n" +
+			"--BOUND--\r\n")
+
+	m, err := message.Read(r)
+	if err != nil {
+		log.Fatal(err)
+	}
+	mr := m.MultipartReader()
+	defer mr.Close()
+
+	for n := 0; ; n++ {
+		lease, err := mr.LeasePart()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			log.Fatal(err)
+		}
+
+		// Read only the first half of this part's segment.
+		half := make([]byte, 8)
+		if _, err := io.ReadFull(lease.Part().Body, half); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("part %d first half: %s\n", n, half)
+
+		// Advancing now is rejected because the part is not finished.
+		if _, err := mr.LeasePart(); err != message.ErrPartNotConsumed {
+			log.Fatalf("expected ErrPartNotConsumed, got %v", err)
+		}
+
+		// Give up the lease: the remaining body is drained before advance.
+		if err := lease.Abandon(); err != nil {
+			log.Fatal(err)
+		}
+	}
+	// Output:
+	// part 0 first half: 01234567
+	// part 1 first half: FEDCBA98
 }

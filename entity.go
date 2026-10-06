@@ -170,7 +170,7 @@ func (e *Entity) MultipartReader() MultipartReader {
 	if mb, ok := e.Body.(*multipartBody); ok {
 		return mb
 	}
-	return &multipartReader{textproto.NewMultipartReader(e.Body, e.mediaParams["boundary"])}
+	return &multipartReader{r: textproto.NewMultipartReader(e.Body, e.mediaParams["boundary"])}
 }
 
 // writeBodyTo writes this entity's body to w (without the header).
