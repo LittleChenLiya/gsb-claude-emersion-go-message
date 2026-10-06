@@ -61,6 +61,56 @@ func decodeHeader(s string) (string, error) {
 	return dec, nil
 }
 
+// hasEncodedWordShape reports whether word has the framing of an RFC 2047
+// encoded-word: "=?<charset>?<encoding>?<text>?=".
+func hasEncodedWordShape(word string) bool {
+	if len(word) < 8 || !strings.HasPrefix(word, "=?") ||
+		!strings.HasSuffix(word, "?=") || strings.Count(word, "?") != 4 {
+		return false
+	}
+	inner := word[2 : len(word)-2]
+	i := strings.IndexByte(inner, '?')
+	if i <= 0 { // the charset cannot be empty
+		return false
+	}
+	// The encoding is a single character, the encoded text may be empty.
+	return strings.IndexByte(inner[i+1:], '?') == 1
+}
+
+// checkEncodedWords scans s for RFC 2047 encoded-word candidates. It returns
+// an error if a candidate has the encoded-word framing but fails to decode.
+// Tokens without the encoded-word framing are literal text, as per RFC 2047.
+func checkEncodedWords(s string) error {
+	wordDecoder := mime.WordDecoder{CharsetReader: charsetReader}
+	for {
+		i := strings.Index(s, "=?")
+		if i < 0 {
+			return nil
+		}
+		s = s[i+2:]
+		j := strings.Index(s, "?=")
+		if j < 0 {
+			return nil
+		}
+		if word := "=?" + s[:j+2]; hasEncodedWordShape(word) {
+			if _, err := wordDecoder.Decode(word); err != nil {
+				return fmt.Errorf("message: malformed encoded-word %q: %w", word, err)
+			}
+		}
+	}
+}
+
+// decodeHeaderView decodes an internationalized header field for the decoded
+// view of a header entry. Unlike decodeHeader, malformed encoded-words are
+// reported as an error. If decoding fails, it returns the input string and
+// the error.
+func decodeHeaderView(s string) (string, error) {
+	if err := checkEncodedWords(s); err != nil {
+		return s, err
+	}
+	return decodeHeader(s)
+}
+
 func encodeHeader(s string) string {
 	return mime.QEncoding.Encode("utf-8", s)
 }

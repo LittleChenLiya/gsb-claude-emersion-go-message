@@ -1,12 +1,15 @@
 package message_test
 
 import (
+	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"strings"
 
 	"github.com/emersion/go-message"
+	"github.com/emersion/go-message/textproto"
 )
 
 func ExampleRead() {
@@ -135,4 +138,38 @@ func Example_transform() {
 	w.Close()
 
 	log.Println(b.String())
+}
+
+func ExampleHeader_Entries() {
+	r := bufio.NewReader(strings.NewReader("Subject: =?UTF-8?Q?Hello_World?=\r\n" +
+		"Subject: Second subject\r\n" +
+		"X-Bad-Word: =?UTF-8?Q?bad=ZZ?=\r\n" +
+		"X-Folded: a long folded value\r\n" +
+		"\twith continuation\r\n" +
+		"\r\n"))
+	th, err := textproto.ReadHeader(r)
+	if err != nil {
+		log.Fatal(err)
+	}
+	h := message.Header{Header: th}
+
+	// Entries exposes both the raw bytes and the decoded value of each
+	// field, in their original order.
+	entries, err := h.Entries()
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, e := range entries {
+		status := "ok"
+		if e.Err != nil {
+			status = "decode error"
+		}
+		fmt.Printf("%s: %q (%s)\n", e.Key, e.Value, status)
+	}
+
+	// Output:
+	// Subject: "Hello World" (ok)
+	// Subject: "Second subject" (ok)
+	// X-Bad-Word: "=?UTF-8?Q?bad=ZZ?=" (decode error)
+	// X-Folded: "a long folded value with continuation" (ok)
 }

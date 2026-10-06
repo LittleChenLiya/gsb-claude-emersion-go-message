@@ -120,3 +120,52 @@ func (h *Header) Fields() HeaderFields {
 func (h *Header) FieldsByKey(k string) HeaderFields {
 	return &headerFields{h.Header.FieldsByKey(k)}
 }
+
+// An Entry is a single header field, providing a dual view of the field: the
+// raw bytes as they appeared in the message, and the decoded value.
+//
+// Entries are a read-only view: they cannot be used to modify the header.
+type Entry struct {
+	// Key is the canonicalized header field key.
+	Key string
+	// Raw is the raw header field, in the "Key: value" form, including the
+	// trailing CRLF. These are exactly the bytes the field was read with:
+	// unmodified fields are never re-folded when the header is written.
+	// Raw should not be modified and becomes invalid when the header is
+	// updated.
+	Raw []byte
+	// Value is the decoded header field value. If the value cannot be
+	// decoded (e.g. it contains a malformed RFC 2047 encoded-word), Value
+	// holds the raw field value and Err is non-nil.
+	Value string
+	// Err is the decoding error for the field value, if any. It only
+	// affects the decoded view: Header.Get keeps returning the raw field
+	// value regardless.
+	Err error
+}
+
+// Entries returns all header fields in their original order, as a dual
+// raw/decoded view. Fields with the same key are kept in the order they
+// appear in the header.
+//
+// An error is returned only if the raw form of a field cannot be produced
+// (e.g. a field added with Add contains invalid characters). Decoding
+// failures of individual fields are reported in Entry.Err instead.
+func (h *Header) Entries() ([]Entry, error) {
+	l := make([]Entry, 0, h.Len())
+	fields := h.Fields()
+	for fields.Next() {
+		raw, err := fields.Raw()
+		if err != nil {
+			return nil, err
+		}
+		v, derr := decodeHeaderView(fields.Value())
+		l = append(l, Entry{
+			Key:   fields.Key(),
+			Raw:   raw,
+			Value: v,
+			Err:   derr,
+		})
+	}
+	return l, nil
+}
