@@ -231,10 +231,97 @@ type MultipartReader struct {
 	currentPart *Part
 	partsRead   int
 
+	leased *PartLease // current outstanding lease, if any
+
 	nl               []byte // "\r\n" or "\n" (set after seeing first boundary line)
 	nlDashBoundary   []byte // nl + "--boundary"
 	dashBoundaryDash []byte // "--boundary--"
 	dashBoundary     []byte // "--boundary"
+}
+
+// ErrPartNotDrained is returned by MultipartReader.LeasePart when the
+// previously leased part has been neither fully consumed nor released.
+var ErrPartNotDrained = errors.New("multipart: previous leased part not fully consumed or released")
+
+// A PartLease is a lease on a single part of a multipart body, obtained via
+// MultipartReader.LeasePart. It records whether the caller fully consumed the
+// part body. The caller must either read the body until io.EOF or call
+// Release before the reader can advance to the next part.
+type PartLease struct {
+	// Header is the parsed header of the leased part.
+	Header Header
+
+	part *Part
+
+	fullyConsumed bool // caller read the body to io.EOF
+	released      bool // Release has been called
+}
+
+// Read reads the body of the leased part. Once the body has been read to
+// io.EOF, the lease is marked as fully consumed.
+func (l *PartLease) Read(p []byte) (int, error) {
+	n, err := l.part.Read(p)
+	if err == io.EOF {
+		l.fullyConsumed = true
+	}
+	return n, err
+}
+
+// FullyConsumed reports whether the caller read the whole part body, i.e.
+// Read returned io.EOF. Bodies drained by Release do not count as consumed
+// by the caller.
+func (l *PartLease) FullyConsumed() bool {
+	return l.fullyConsumed
+}
+
+// Released reports whether Release has been called on this lease.
+func (l *PartLease) Released() bool {
+	return l.released
+}
+
+// Release abandons the lease. Any unread portion of the part body is drained
+// so that the reader can advance to the next part. Release does not close
+// the underlying stream. It is safe to call Release multiple times.
+func (l *PartLease) Release() error {
+	if l.released {
+		return nil
+	}
+	l.released = true
+	if !l.fullyConsumed {
+		// Drain the remainder via the raw part so fullyConsumed keeps
+		// reflecting the caller's own consumption.
+		if _, err := io.Copy(ioutil.Discard, l.part); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LeasePart returns a lease for the next part in the multipart or an error.
+// When there are no more parts, the error io.EOF is returned.
+//
+// Unlike NextPart, LeasePart enforces sequential consumption: if the
+// previously leased part was neither fully consumed nor released, LeasePart
+// fails with ErrPartNotDrained and the reader is not advanced. When the
+// caller is done with a part before reaching its end, it must call
+// PartLease.Release, which drains the remainder of the part before the next
+// lease can be obtained.
+func (r *MultipartReader) LeasePart() (*PartLease, error) {
+	if r.leased != nil && !r.leased.released {
+		if !r.leased.fullyConsumed {
+			return nil, ErrPartNotDrained
+		}
+		// The previous lease was fully consumed by the caller: nothing
+		// left to drain, retire it.
+		r.leased.released = true
+	}
+	p, err := r.NextPart()
+	if err != nil {
+		return nil, err
+	}
+	l := &PartLease{part: p, Header: p.Header}
+	r.leased = l
+	return l, nil
 }
 
 // NextPart returns the next part in the multipart or an error.
