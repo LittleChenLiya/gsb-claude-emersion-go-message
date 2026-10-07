@@ -2,6 +2,7 @@ package message_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"strings"
@@ -135,4 +136,38 @@ func Example_transform() {
 	w.Close()
 
 	log.Println(b.String())
+}
+
+// Short regression example for the original header interface: parsing a
+// Content-Disposition header field with ContentDisposition.
+func ExampleHeader_ContentDisposition() {
+	var h message.Header
+	h.SetContentDisposition("attachment", map[string]string{"filename": "hello.txt"})
+
+	disp, params, err := h.ContentDisposition()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(disp, params["filename"])
+
+	// Output: attachment hello.txt
+}
+
+// ContentDispositionDiagnostics reports duplicate parameters in source order
+// without rewriting the header.
+func ExampleHeader_ContentDispositionDiagnostics() {
+	var h message.Header
+	h.AddRaw([]byte(`Content-Disposition: attachment; filename="a.txt"; FILENAME="b.txt"`))
+
+	_, _, conflicts, _ := h.ContentDispositionDiagnostics()
+	for _, c := range conflicts {
+		fmt.Printf("%s (folded: %s) = %s, first seen as %s = %s\n", c.Key, c.FoldedKey, c.Value, c.FirstKey, c.FirstValue)
+	}
+
+	// The header itself is left untouched.
+	fmt.Println(h.Get("Content-Disposition"))
+
+	// Output:
+	// FILENAME (folded: filename) = b.txt, first seen as filename = a.txt
+	// attachment; filename="a.txt"; FILENAME="b.txt"
 }

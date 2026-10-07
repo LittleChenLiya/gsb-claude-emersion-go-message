@@ -85,3 +85,121 @@ func TestUnknownCharset(t *testing.T) {
 		t.Error("Expected error to verify IsUnknownCharset")
 	}
 }
+
+func TestContentDispositionDiagnosticsDuplicate(t *testing.T) {
+	raw := `attachment; filename="a.txt"; filename="b.txt"`
+	var h Header
+	h.AddRaw([]byte("Content-Disposition: " + raw))
+
+	disp, params, conflicts, err := h.ContentDispositionDiagnostics()
+
+	// The existing parsing policy is preserved: whatever ContentDisposition
+	// returns, ContentDispositionDiagnostics returns too.
+	wantDisp, wantParams, wantErr := h.ContentDisposition()
+	if disp != wantDisp || err != wantErr {
+		t.Errorf("Expected disp/err (%q, %v) but got (%q, %v)", wantDisp, wantErr, disp, err)
+	}
+	if !reflect.DeepEqual(params, wantParams) {
+		t.Errorf("Expected params %v but got %v", wantParams, params)
+	}
+
+	// The duplicate is reported in source order, with original and folded keys.
+	if len(conflicts) != 1 {
+		t.Fatalf("Expected 1 conflict but got %v", conflicts)
+	}
+	c := conflicts[0]
+	if c.Key != "filename" || c.FoldedKey != "filename" {
+		t.Errorf("Expected key/folded key filename/filename but got %q/%q", c.Key, c.FoldedKey)
+	}
+	if c.Value != "b.txt" || c.FirstValue != "a.txt" {
+		t.Errorf("Expected values b.txt/a.txt but got %q/%q", c.Value, c.FirstValue)
+	}
+
+	// The header is not rewritten by the diagnostic view.
+	if got := h.Get("Content-Disposition"); got != raw {
+		t.Errorf("Expected header value %q but got %q", raw, got)
+	}
+	if got, err := h.Raw("Content-Disposition"); err != nil || string(got) != "Content-Disposition: "+raw {
+		t.Errorf("Expected raw header %q but got %q (err = %v)", "Content-Disposition: "+raw, got, err)
+	}
+}
+
+func TestContentDispositionDiagnosticsCaseFolded(t *testing.T) {
+	raw := `attachment; FileName="a.txt"; FILENAME="b.txt"`
+	var h Header
+	h.AddRaw([]byte("Content-Disposition: " + raw))
+
+	_, _, conflicts, _ := h.ContentDispositionDiagnostics()
+
+	if len(conflicts) != 1 {
+		t.Fatalf("Expected 1 conflict but got %v", conflicts)
+	}
+	c := conflicts[0]
+	if c.Key != "FILENAME" || c.FoldedKey != "filename" || c.FirstKey != "FileName" {
+		t.Errorf("Expected keys FILENAME/filename/FileName but got %q/%q/%q", c.Key, c.FoldedKey, c.FirstKey)
+	}
+	if c.Value != "b.txt" || c.FirstValue != "a.txt" {
+		t.Errorf("Expected values b.txt/a.txt but got %q/%q", c.Value, c.FirstValue)
+	}
+
+	// The header is not rewritten by the diagnostic view.
+	if got := h.Get("Content-Disposition"); got != raw {
+		t.Errorf("Expected header value %q but got %q", raw, got)
+	}
+}
+
+func TestContentDispositionDiagnosticsRFC2231(t *testing.T) {
+	raw := `attachment; filename*0*=utf-8''hello%20; filename*1*=world.txt`
+	var h Header
+	h.AddRaw([]byte("Content-Disposition: " + raw))
+
+	disp, params, conflicts, err := h.ContentDispositionDiagnostics()
+	if err != nil {
+		t.Error("Expected no error when parsing RFC 2231 segments, but got:", err)
+	}
+	if disp != "attachment" {
+		t.Errorf("Expected disposition %q but got %q", "attachment", disp)
+	}
+	if params["filename"] != "hello world.txt" {
+		t.Errorf("Expected decoded filename %q but got %q", "hello world.txt", params["filename"])
+	}
+
+	// Continuation segments of a single parameter are not duplicates.
+	if len(conflicts) != 0 {
+		t.Errorf("Expected no conflicts but got %v", conflicts)
+	}
+
+	// The header is not rewritten by the diagnostic view.
+	if got := h.Get("Content-Disposition"); got != raw {
+		t.Errorf("Expected header value %q but got %q", raw, got)
+	}
+}
+
+func TestContentTypeDiagnostics(t *testing.T) {
+	raw := `text/plain; charset=utf-8; CHARSET=us-ascii`
+	var h Header
+	h.AddRaw([]byte("Content-Type: " + raw))
+
+	mediaType, params, conflicts, err := h.ContentTypeDiagnostics()
+
+	// The existing parsing policy is preserved: whatever ContentType
+	// returns, ContentTypeDiagnostics returns too.
+	wantMediaType, wantParams, wantErr := h.ContentType()
+	if mediaType != wantMediaType || err != wantErr {
+		t.Errorf("Expected media type/err (%q, %v) but got (%q, %v)", wantMediaType, wantErr, mediaType, err)
+	}
+	if !reflect.DeepEqual(params, wantParams) {
+		t.Errorf("Expected params %v but got %v", wantParams, params)
+	}
+
+	if len(conflicts) != 1 {
+		t.Fatalf("Expected 1 conflict but got %v", conflicts)
+	}
+	c := conflicts[0]
+	if c.Key != "CHARSET" || c.FoldedKey != "charset" || c.FirstKey != "charset" {
+		t.Errorf("Expected keys CHARSET/charset/charset but got %q/%q/%q", c.Key, c.FoldedKey, c.FirstKey)
+	}
+	if got := h.Get("Content-Type"); got != raw {
+		t.Errorf("Expected header value %q but got %q", raw, got)
+	}
+}

@@ -2,6 +2,8 @@ package message
 
 import (
 	"mime"
+	"strconv"
+	"strings"
 
 	"github.com/emersion/go-message/textproto"
 )
@@ -15,6 +17,176 @@ func parseHeaderWithParams(s string) (f string, params map[string]string, err er
 		params[k], _ = decodeHeader(v)
 	}
 	return
+}
+
+// A ParamConflict describes a duplicate parameter found while parsing a
+// header field value with parameters, such as Content-Type or
+// Content-Disposition.
+type ParamConflict struct {
+	// Key is the parameter key of the duplicate occurrence, as written in
+	// the header (original case).
+	Key string
+	// FoldedKey is the case-folded parameter key used to detect the
+	// conflict. RFC 2231 extended and continuation forms (e.g. "filename*"
+	// or "filename*0*") are folded to their base key (e.g. "filename").
+	FoldedKey string
+	// Value is the parameter value of the duplicate occurrence.
+	Value string
+	// FirstKey is the parameter key of the first occurrence, as written in
+	// the header (original case).
+	FirstKey string
+	// FirstValue is the parameter value of the first occurrence.
+	FirstValue string
+}
+
+// splitParamFields splits a header field value at ';' boundaries that are not
+// inside a quoted-string. The first element is the main value (e.g. the media
+// type), the remaining elements are raw "key=value" parameter fields.
+func splitParamFields(s string) []string {
+	var fields []string
+	start := 0
+	inQuote := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			escaped = false
+		case inQuote && c == '\\':
+			escaped = true
+		case c == '"':
+			inQuote = !inQuote
+		case c == ';' && !inQuote:
+			fields = append(fields, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(fields, s[start:])
+}
+
+// parseParamKey folds a parameter key for duplicate detection: it is
+// lower-cased and RFC 2231 extended/continuation markers ("*", "*N", "*N*")
+// are stripped, so that continuation segments of a single parameter (e.g.
+// "filename*0*" and "filename*1*") are not mistaken for duplicates. The
+// returned segment is the continuation segment number, or an empty string
+// for plain and extended keys.
+func parseParamKey(key string) (base, segment string) {
+	lower := strings.ToLower(key)
+	i := strings.IndexByte(lower, '*')
+	if i < 0 {
+		return lower, ""
+	}
+	suffix := lower[i+1:]
+	if suffix == "" {
+		return lower[:i], "" // extended value: "name*"
+	}
+	num := strings.TrimSuffix(suffix, "*")
+	if _, err := strconv.Atoi(num); err == nil {
+		return lower[:i], num // continuation segment: "name*N" or "name*N*"
+	}
+	return lower, ""
+}
+
+// unquoteParamValue strips the quotes of a quoted-string parameter value and
+// resolves backslash escapes. Values that are not quoted are returned as-is.
+func unquoteParamValue(v string) string {
+	if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+		return v
+	}
+	v = v[1 : len(v)-1]
+	if strings.IndexByte(v, '\\') < 0 {
+		return v
+	}
+	var sb strings.Builder
+	escaped := false
+	for _, ch := range v {
+		if escaped {
+			escaped = false
+		} else if ch == '\\' {
+			escaped = true
+			continue
+		}
+		sb.WriteRune(ch)
+	}
+	return sb.String()
+}
+
+// scanParamConflicts scans a header field value with parameters and reports
+// duplicate parameters in source order. It is a read-only diagnostic view:
+// the header is never modified. RFC 2231 continuation segments of a single
+// parameter are not reported as duplicates.
+func scanParamConflicts(s string) []ParamConflict {
+	fields := splitParamFields(s)
+	if len(fields) < 2 {
+		return nil
+	}
+	type occurrence struct {
+		key, value string
+	}
+	first := make(map[string]occurrence)             // base key -> first plain/extended occurrence
+	firstSegment := make(map[string]occurrence)      // base key -> first continuation segment
+	segments := make(map[string]map[string]struct{}) // base key -> seen segment numbers
+	var conflicts []ParamConflict
+	for _, f := range fields[1:] {
+		eq := strings.IndexByte(f, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(f[:eq])
+		if key == "" {
+			continue
+		}
+		value := unquoteParamValue(strings.TrimSpace(f[eq+1:]))
+		base, segment := parseParamKey(key)
+		if segment != "" {
+			// RFC 2231 continuation segment: distinct segment numbers of
+			// the same parameter are not duplicates.
+			segs := segments[base]
+			if segs == nil {
+				segs = make(map[string]struct{})
+				segments[base] = segs
+			}
+			if _, ok := segs[segment]; ok {
+				conflicts = append(conflicts, ParamConflict{
+					Key:        key,
+					FoldedKey:  base,
+					Value:      value,
+					FirstKey:   firstSegment[base].key,
+					FirstValue: firstSegment[base].value,
+				})
+			} else if prev, ok := first[base]; ok {
+				conflicts = append(conflicts, ParamConflict{
+					Key:        key,
+					FoldedKey:  base,
+					Value:      value,
+					FirstKey:   prev.key,
+					FirstValue: prev.value,
+				})
+			} else {
+				segs[segment] = struct{}{}
+				if _, ok := firstSegment[base]; !ok {
+					firstSegment[base] = occurrence{key: key, value: value}
+				}
+			}
+			continue
+		}
+		prev, ok := first[base]
+		if !ok {
+			prev, ok = firstSegment[base]
+		}
+		if ok {
+			conflicts = append(conflicts, ParamConflict{
+				Key:        key,
+				FoldedKey:  base,
+				Value:      value,
+				FirstKey:   prev.key,
+				FirstValue: prev.value,
+			})
+		} else {
+			first[base] = occurrence{key: key, value: value}
+		}
+	}
+	return conflicts
 }
 
 func formatHeaderWithParams(f string, params map[string]string) string {
@@ -78,6 +250,24 @@ func (h *Header) SetContentType(t string, params map[string]string) {
 	h.Set("Content-Type", formatHeaderWithParams(t, params))
 }
 
+// ContentTypeDiagnostics parses the Content-Type header field like
+// ContentType, and additionally reports duplicate parameters.
+//
+// The returned media type, params and error are exactly what ContentType
+// returns; the header is never modified. conflicts lists duplicate
+// parameters in source order, distinguishing keys as written in the header
+// from their case-folded form. RFC 2231 continuation segments (e.g.
+// "filename*0*" and "filename*1*") are treated as a single parameter and are
+// not reported as duplicates.
+func (h *Header) ContentTypeDiagnostics() (t string, params map[string]string, conflicts []ParamConflict, err error) {
+	v := h.Get("Content-Type")
+	if v == "" {
+		return "text/plain", nil, nil, nil
+	}
+	t, params, err = parseHeaderWithParams(v)
+	return t, params, scanParamConflicts(v), err
+}
+
 // ContentDisposition parses the Content-Disposition header field, as defined in
 // RFC 2183.
 func (h *Header) ContentDisposition() (disp string, params map[string]string, err error) {
@@ -88,6 +278,15 @@ func (h *Header) ContentDisposition() (disp string, params map[string]string, er
 // defined in RFC 2183.
 func (h *Header) SetContentDisposition(disp string, params map[string]string) {
 	h.Set("Content-Disposition", formatHeaderWithParams(disp, params))
+}
+
+// ContentDispositionDiagnostics parses the Content-Disposition header field
+// like ContentDisposition, and additionally reports duplicate parameters. See
+// ContentTypeDiagnostics for details about the returned values.
+func (h *Header) ContentDispositionDiagnostics() (disp string, params map[string]string, conflicts []ParamConflict, err error) {
+	v := h.Get("Content-Disposition")
+	disp, params, err = parseHeaderWithParams(v)
+	return disp, params, scanParamConflicts(v), err
 }
 
 // Text parses a plaintext header field. The field charset is automatically
