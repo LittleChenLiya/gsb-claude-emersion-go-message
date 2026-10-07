@@ -2,6 +2,7 @@ package message_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"strings"
@@ -135,4 +136,46 @@ func Example_transform() {
 	w.Close()
 
 	log.Println(b.String())
+}
+
+// Regression example for the original interface: Get returns the raw header
+// bytes, and ContentDisposition keeps its existing policy of rejecting
+// duplicate parameters.
+func ExampleHeader_ContentDisposition() {
+	var h message.Header
+	h.Set("Content-Disposition", `attachment; filename="a.txt"; filename="b.txt"`)
+
+	fmt.Println("raw:", h.Get("Content-Disposition"))
+	disp, params, err := h.ContentDisposition()
+	fmt.Println("disp:", disp, "params:", params, "err:", err != nil)
+
+	// Output:
+	// raw: attachment; filename="a.txt"; filename="b.txt"
+	// disp: attachment; filename="a.txt"; filename="b.txt" params: map[] err: true
+}
+
+// The diagnostics view preserves duplicate parameter occurrences in source
+// order, distinguishing original keys from case-folded keys, without
+// rewriting the header. RFC 2231 continuation segments are not reported as
+// duplicates.
+func ExampleHeader_ContentDispositionDiagnostics() {
+	var h message.Header
+	h.Set("Content-Disposition", `attachment; Filename="a.txt"; FILENAME="b.txt"; filename*0*=utf-8''hello; filename*1*=%20world.txt`)
+
+	_, diags := h.ContentDispositionDiagnostics()
+	for _, c := range diags.Conflicts {
+		fmt.Println("conflict:", c.FoldedKey)
+		for _, e := range c.Entries {
+			fmt.Printf("  #%d key=%q folded=%q value=%s\n", e.Index, e.Key, e.FoldedKey, e.Value)
+		}
+	}
+	fmt.Println("entries:", len(diags.Entries))
+	fmt.Println("raw preserved:", h.Get("Content-Disposition"))
+
+	// Output:
+	// conflict: filename
+	//   #0 key="Filename" folded="filename" value="a.txt"
+	//   #1 key="FILENAME" folded="filename" value="b.txt"
+	// entries: 4
+	// raw preserved: attachment; Filename="a.txt"; FILENAME="b.txt"; filename*0*=utf-8''hello; filename*1*=%20world.txt
 }
